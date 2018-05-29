@@ -1,0 +1,118 @@
+create or replace procedure get_itens_nao_conferidos_ped(
+    rs out sys_refcursor,
+    id_fornecedor fornecedores.id_fornecedor%type,
+    id_usuario usuarios.id_usuario%type,
+    id_nota_fiscal nota_fiscal.id_nota_fiscal%type
+) is
+begin
+    open rs for '
+    select p.cd_produto, p.nm_produto, itc.qt_pedido, itc.vl_item_pedido
+      from itens_cotacao itc,
+           produtos p,
+           pedido_nota_fiscal pnf
+     where itc.id_pedido = pnf.id_pedido
+       and itc.id_produto = p.id_produto
+       and pnf.id_nota_fiscal = :id
+       and not exists(select 1
+              from itens_conferidos
+             where id_pedido = itc.id_pedido
+               and id_produto = itc.id_produto
+               and id_entrega = itc.id_entrega
+            )
+    ' using id_nota_fiscal;
+end;
+
+create or replace procedure get_itens_nao_conferidos_nota(
+    rs out sys_refcursor,
+    id_fornecedor fornecedores.id_fornecedor%type,
+    id_usuario usuarios.id_usuario%type,
+    id_nota_fiscal nota_fiscal_eletronica.id_nota_fiscal%type
+) is
+begin
+    open rs for '
+    select cd_peca, nm_peca, qt_item, vl_item
+      from itens_nota_fiscal itnf, pecas p
+     where itnf.id_peca = p.id_peca
+       and itnf.id_nota_fiscal = :id
+       and itnf.id_item_nota_fiscal not in (
+        select id_item_nota_fiscal
+          from itens_conferidos
+         where id_item_nota_fiscal in (select id_item_nota_fiscal from itens_nota_fiscal where id_nota_fiscal = itnf.id_nota_fiscal)
+     )
+    ' using id_nota_fiscal;
+end;
+
+create or replace procedure get_itens_conferidos(
+    rs out sys_refcursor,
+    id_fornecedor fornecedores.id_fornecedor%type,
+    id_usuario usuarios.id_usuario%type,
+    id_nota_fiscal nota_fiscal.id_nota_fiscal%type
+) is
+begin
+    open rs for '
+    select pc.cd_peca,
+           pc.nm_peca,
+           itnf.qt_item,
+           itnf.vl_item,
+           pd.cd_produto,
+           pd.nm_produto,
+           itc.qt_pedido,
+           itc.vl_item_pedido
+      from itens_conferidos itcf,
+           pecas pc,
+           produtos pd,
+           itens_nota_fiscal itnf,
+           itens_cotacao itc
+     where itcf.id_item_nota_fiscal = itnf.id_item_nota_fiscal
+       and itcf.id_pedido = itc.id_pedido
+       and itcf.id_entrega = itc.id_entrega
+       and itcf.id_produto = itc.id_produto
+       and itc.id_produto = pd.id_produto
+       and itnf.id_peca = pc.id_peca
+       and itnf.id_nota_fiscal = :id
+    ' using id_nota_fiscal;
+end;
+
+create or replace procedure get_nota_fiscal(
+    rs out sys_refcursor,
+    id_fornecedor fornecedores.id_fornecedor%type,
+    id_usuario usuarios.id_usuario%type,
+    id_nota_fiscal nota_fiscal.id_nota_fiscal%type
+) is
+begin
+    open rs for '
+    select vnf.nr_nota_fiscal,
+           vnf.dt_emissao,
+           vnf.hr_emissao,
+           c.id_comprador,
+           dnf.nm_razao_social
+    from nota_fiscal nf,
+         vw_nota_fiscal vnf,
+         vw_destinatario_nota_fiscal dnf,
+         compradores c
+    where nf.id_nota_fiscal = vnf.id_nota_fiscal
+    and nf.id_nota_fiscal = dnf.id_nota_fiscal
+    and c.nr_cgc = dnf.nr_cgc
+    and nf.id_nota_fiscal = :id
+    ' using id_nota_fiscal;
+end;
+
+create or replace procedure get_pedidos_nota_fiscal(
+    rs out sys_refcursor,
+    id_fornecedor fornecedores.id_fornecedor%type,
+    id_usuario usuarios.id_usuario%type,
+    id_nota_fiscal nota_fiscal.id_nota_fiscal%type
+) is
+begin
+    open rs for '
+    select p.id_pedido,
+           p.nr_pedido_cliente,
+           s.nr_solicitacao_cliente
+      from pedido_nota_fiscal pnf,
+           pedidos p,
+           solicitacoes s
+     where p.id_solicitacao = s.id_solicitacao
+       and pnf.id_pedido = p.id_pedido
+       and pnf.id_nota_fiscal = :id
+    ' using id_nota_fiscal;
+end;

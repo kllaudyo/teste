@@ -1,0 +1,235 @@
+create or replace procedure salvar_nfe(
+    rs out sys_refcursor,
+    id_fornecedor fornecedores.id_fornecedor%type,
+    id_usuario usuarios.id_usuario%type,
+    id_pedido pedidos.id_pedido%type,
+    te_nota_fiscal xmltype
+)is
+    id_nota_fiscal nota_fiscal_eletronica.id_nota_fiscal%type;
+    itens_conf itens_conferidos%rowtype;
+    cursor get_itens_conferidos(
+        pid_nota_fiscal nota_fiscal_eletronica.id_nota_fiscal%type,
+        pid_pedido pedidos.id_pedido%type
+    ) is
+    select id_item_nota_fiscal, id_pedido, id_produto, id_entrega, (qt_item-qt_pedido)*-1 as qt_conferido, vl_item as vl_conferido, cs_status
+      from ( select itn.id_item_nota_fiscal,
+                    itp.id_pedido,
+                    itp.id_entrega,
+                    itp.id_produto,
+                    (select cd_produto
+                      from produtos
+                     where id_produto = itp.id_produto) cd_produto,
+                    (select nm_produto
+                       from produtos
+                      where id_produto = itp.id_produto) nm_produto,
+                    itn.id_peca,
+                    (select cd_peca
+                       from pecas
+                      where id_peca = itn.id_peca) cd_peca,
+                    (select nm_peca
+                       from pecas
+                      where id_peca = itn.id_peca)nm_peca,
+                    itp.vl_item_pedido,
+                    itn.vl_item,
+                    itp.qt_pedido,
+                    itn.qt_item,
+                    case
+                    when qt_item < qt_pedido
+                      then 'P'
+                    when qt_item = qt_pedido
+                      then 'C'
+                    else 'N' end cs_status
+               from (select itn.id_item_nota_fiscal,
+                            itn.id_peca,
+                            itn.vl_item,
+                            itn.qt_item
+                       from itens_nota_fiscal itn,
+                            pedido_nota_fiscal pn
+                      where itn.id_nota_fiscal = pn.id_nota_fiscal
+                        and pn.id_pedido = pid_pedido
+                        and not exists(select 1
+                                         from itens_conferidos
+                                        where id_item_nota_fiscal = itn.id_item_nota_fiscal
+                                          and id_pedido = pn.id_pedido
+                                      )
+                        and not exists(select 1
+                                         from itens_nota_fiscal
+                                        where id_item_nota_fiscal <> itn.id_item_nota_fiscal
+                                          and vl_item = itn.vl_item
+                                          and id_nota_fiscal = itn.id_nota_fiscal
+                                      )
+                    ) itn,
+                    (select itp.id_pedido,
+                            itp.id_entrega,
+                            itp.id_produto,
+                            itp.vl_item_pedido,
+                            itp.qt_pedido
+                       from itens_cotacao itp,
+                            pedido_nota_fiscal pn
+                      where itp.id_pedido = pn.id_pedido
+                        and pn.id_nota_fiscal = pid_nota_fiscal
+                        and not exists(select 1
+                                         from itens_conferidos
+                                        where id_pedido = itp.id_pedido
+                                          and id_produto = itp.id_produto
+                                          and id_entrega = itp.id_entrega
+                                      )
+                        and not exists(select 1
+                                         from itens_cotacao
+                                        where id_pedido = itp.id_pedido
+                                          and id_produto <> itp.id_produto
+                                          and vl_item_pedido = itp.vl_item_pedido
+                                      )
+                    ) itp
+              where itn.vl_item = itp.vl_item_pedido
+           )
+     where cs_status in ('C','P');
+begin
+
+    id_nota_fiscal := sq_nota_fiscal.nextval;
+
+    --armazena arquivo
+    execute immediate '
+        insert into nota_fiscal_eletronica
+        (id_nota_fiscal, te_nota_fiscal, id_fornecedor, id_usuario)
+        values
+        (:id, :xml, :id_fornecedor, :id_usuario)
+    ' using id_nota_fiscal, te_nota_fiscal, id_fornecedor, id_usuario;
+
+    --associa nota e pedido
+    execute immediate '
+        insert into pedido_nota_fiscal
+        (id_nota_fiscal, id_pedido)
+        values
+        (:id_nota_fiscal, :id_pedido)
+    ' using id_nota_fiscal, id_pedido;
+
+    --inclui detalhes nota fiscal
+    execute immediate '
+        insert into nota_fiscal
+        (id_nota_fiscal, nr_nota_fiscal, hs_nota_fiscal, dt_emissao, vl_nota_fiscal)
+        (select id_nota_fiscal, nr_nota_fiscal, hs_nota_fiscal, to_date(dt_emissao || '' '' || hr_emissao, ''dd/mm/yyyy hh24:mi:ss'') , vl_nota_fiscal
+           from vw_nota_fiscal
+          where id_nota_fiscal = :id
+        )
+    ' using id_nota_fiscal;
+
+	--Inclui itens nas peças dos fornecedores
+	execute immediate '
+		merge into pecas p
+		using (
+			select cd_peca,
+				   nm_peca,
+				   nm_unidade
+			  from vw_itens_nota_fiscal
+			 where id_nota_fiscal = :id_nota_fiscal
+			  ) pn
+		   on (
+			p.cd_peca = pn.cd_peca
+			and p.id_fornecedor = :id_fornecedor
+		   )
+		when matched then
+			update
+			   set p.nm_peca = pn.nm_peca,
+				   p.nm_unidade = pn.nm_unidade
+		when not matched then
+			insert (id_peca, id_fornecedor, cd_peca, nm_peca, nm_unidade)
+			values (sq_pecas.nextval, :id_fornecedor, pn.cd_peca, pn.nm_peca, pn.nm_unidade)
+	' using id_nota_fiscal, id_fornecedor, id_fornecedor;
+
+	--Inclui itens nota fiscal
+	execute immediate '
+		insert into itens_nota_fiscal
+		(id_item_nota_fiscal,
+		 id_nota_fiscal,
+		 id_peca,
+		 nm_unidade,
+		 qt_item,
+		 vl_ipi,
+		 vl_icms,
+		 vl_item,
+		 vl_total,
+		 cs_icms)
+		(select sq_item_nota_fiscal.nextval,
+			    itn.id_nota_fiscal,
+			    p.id_peca,
+			    p.nm_unidade,
+			    itn.qt_item,
+			    itn.vl_ipi,
+			    itn.vl_icms,
+			    itn.vl_item,
+			    itn.vl_total,
+			    itn.cs_icms
+		   from pecas p,
+			    vw_itens_nota_fiscal itn
+		  where p.cd_peca = itn.cd_peca
+		    and p.id_fornecedor = :fornecedor
+		    and itn.id_nota_fiscal = :nota_fiscal)
+	' using id_fornecedor, id_nota_fiscal;
+
+    open get_itens_conferidos(id_nota_fiscal, id_pedido);
+    loop
+    fetch get_itens_conferidos into itens_conf;
+    exit when get_itens_conferidos%notfound;
+        execute immediate '
+        insert into itens_conferidos
+        (
+         id_item_nota_fiscal,
+         id_pedido,
+         id_produto,
+         id_entrega,
+         qt_conferido,
+         vl_conferido,
+         cs_status
+         )
+         (select :id_item,
+                 :id_pedido,
+                 :id_produto,
+                 :id_entrega,
+                 :qt_conferido,
+                 :vl_conferido,
+                 :cs_status
+            from dual
+           where not exists (select 1
+                               from itens_conferidos
+                              where id_item_nota_fiscal = :id_item
+                                and id_pedido = :id_pedido
+                                and id_produto = :id_produto
+                                and id_entrega = :id_entrega
+                            )
+          )
+        ' using itens_conf.id_item_nota_fiscal,
+                itens_conf.id_pedido,
+                itens_conf.id_produto,
+                itens_conf.id_entrega,
+                itens_conf.qt_conferido,
+                itens_conf.vl_conferido,
+                itens_conf.cs_status,
+                itens_conf.id_item_nota_fiscal,
+                itens_conf.id_pedido,
+                itens_conf.id_produto,
+                itens_conf.id_entrega;
+    end loop;
+    close get_itens_conferidos;
+
+    execute immediate '
+    insert into pecas_produtos
+    (id_peca, id_produto, vl_item)
+    (select itn.id_peca, itc.id_produto, itn.vl_item
+       from itens_conferidos itc,
+            itens_nota_fiscal itn
+      where itc.id_item_nota_fiscal = itn.id_item_nota_fiscal
+        and cs_status = ''C''
+        and id_pedido = :id_pedido
+        and not exists (select 1 from pecas_produtos where id_peca = itn.id_peca and id_produto = itc.id_produto )
+    )' using id_pedido;
+
+    commit;
+
+    open rs for 'select 1 as "status", ''Nota Fiscal Eletrônica salva com sucesso!'' as "message" from dual';
+
+exception
+    when others then
+        rollback;
+        open rs for 'select 0 as "status", ''Atenção, não foi possível importar sua Nota Fiscal Eletrônica'' as "message" from dual';
+end;
