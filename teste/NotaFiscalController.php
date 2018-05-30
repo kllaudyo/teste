@@ -39,6 +39,13 @@ class NotaFiscalController
             $this->id_nota_fiscal
         );
 
+        $result["pedidos_range"] = $dao->ultimosPedidos(
+            $this->id_fornecedor,
+            $this->id_usuario,
+            102,
+            $this->id_nota_fiscal
+        );
+
         $result["itens_nao_conferidos_nota"] = $dao->itensNaoConferidosNotaFiscal(
             $this->id_fornecedor,
             $this->id_usuario,
